@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using NLog;
@@ -41,7 +42,6 @@ namespace ImgWebService
                 logger.Error(ex.Message);
                 Console.WriteLine(ex.Message);
             }
-            ///https://ru.stackoverflow.com/questions/622823/Нужно-получить-на-c-исходный-текст-html-страницы про куки файлы
         }
 
         /// <summary>
@@ -119,7 +119,6 @@ namespace ImgWebService
 
             for (int i = 0; i < FilteredImages.Count; ++i)
             {
-                //Uri uri = new Uri(FilteredImages[i].SrcImg, UriKind.RelativeOrAbsolute);
                 var Img = FilteredImages[i];
                 ///если адрес не абсолютный
                 if (!new Uri(FilteredImages[i].SrcImg, UriKind.RelativeOrAbsolute).IsAbsoluteUri)
@@ -150,7 +149,6 @@ namespace ImgWebService
             }
             Console.WriteLine($"Количество доступных для скачивания изображений: {Images.Count}");
 
-            ///Добавить различные проверки
             Console.WriteLine("Введите количество изображений, которые необходимо скачать: ");
             while (true)
             {
@@ -172,7 +170,6 @@ namespace ImgWebService
 
             Console.WriteLine($"Ваш компьютер поддерживает {Environment.ProcessorCount + (Environment.ProcessorCount < 5 ? " потока" : " потоков")}");
 
-            ///Добавить различные проверки
             Console.WriteLine("Введите количество потоков: ");
             while (true)
             {
@@ -205,12 +202,53 @@ namespace ImgWebService
                 DirImages.Create();
             }
 
+            #region скачивание без учета задержки
+            //try
+            //{
+            //    ///Распараллеливаем скачивание
+            //    Parallel.ForEach(Images.Take(ImageCount), new ParallelOptions { MaxDegreeOfParallelism = ThreadCount }, Img =>
+            //    {
+            //        ///Создание подкаталогов по имени хоста
+            //        if (!new DirectoryInfo($@"{DirImages}\{Img.HostUrl}").Exists)
+            //        {
+            //            DirImages.CreateSubdirectory(Img.HostUrl);
+            //        }
+            //        ///Скачиваем изображения
+            //        using (WebClient client = new WebClient())
+            //        {
+            //            if (!new FileInfo($@"{DirImages}\{Img.HostUrl}\{Img.NameImg}").Exists)
+            //            {
+            //                ///Добавить проверку на "валидность" ссылки
+            //                client.DownloadFile(Img.SrcImg, $@"{DirImages}\{Img.HostUrl}\{Img.NameImg}");
+            //            }
+            //            else
+            //            {
+            //                logger.Info("Попытка перезаписи файла");
+            //            }
+            //        }
+            //    });
+
+            //    SerializeJson(Images.Take(ImageCount).ToList());
+            //}
+            //catch (Exception ex)
+            //{
+            //    logger.Error(ex.Message);
+            //    Console.WriteLine(ex.Message);
+            //}
+            #endregion
+
+            DateTime startTime = DateTime.Now;
             try
             {
                 ///Распараллеливаем скачивание
-                Parallel.ForEach(Images.Take(ImageCount), new ParallelOptions { MaxDegreeOfParallelism = ThreadCount }, Img =>
+                ParallelLoopResult parallelLoopResult = Parallel.ForEach(Images.Take(ImageCount), new ParallelOptions { MaxDegreeOfParallelism = ThreadCount }, (Img, state) =>
                 {
-                    ///Создание подкаталогов по имени хоста
+                    ///Останавливаем цикл после минуты
+                    if (DateTime.Now.Subtract(startTime) >= new TimeSpan(0, 0, 1, 0, 0))
+                    {
+                        state.Break();
+                    }
+                    // Создание подкаталогов по имени хоста
                     if (!new DirectoryInfo($@"{DirImages}\{Img.HostUrl}").Exists)
                     {
                         DirImages.CreateSubdirectory(Img.HostUrl);
@@ -218,10 +256,12 @@ namespace ImgWebService
                     ///Скачиваем изображения
                     using (WebClient client = new WebClient())
                     {
+                        if (!IsPageExists(Img.SrcImg)) return;
+
                         if (!new FileInfo($@"{DirImages}\{Img.HostUrl}\{Img.NameImg}").Exists)
                         {
-                            ///Добавить проверку на "валидность" ссылки
                             client.DownloadFile(Img.SrcImg, $@"{DirImages}\{Img.HostUrl}\{Img.NameImg}");
+                            //Console.WriteLine($"Выполняется задача {Task.CurrentId}");
                         }
                         else
                         {
@@ -229,13 +269,42 @@ namespace ImgWebService
                         }
                     }
                 });
-
-                SerializeJson(Images.Take(ImageCount).ToList());
+                if (!parallelLoopResult.IsCompleted)
+                {
+                    Console.WriteLine("Внимание! Из-за долгой задержки (более 1 минуты) задача скачивания изображений прервана и выполнена частично.");
+                    logger.Warn($"Из-за долгой задержки (более 1 минуты) выполнение цикла преждевременно завершено на {parallelLoopResult.LowestBreakIteration} итерации, при выполнении в {ThreadCount + (ThreadCount < 2 ? " потоке" : " потоках")}");
+                }
+                else
+                {
+                    SerializeJson(Images.Take(ImageCount).ToList());
+                }
             }
             catch (Exception ex)
             {
                 logger.Error(ex.Message);
                 Console.WriteLine(ex.Message);
+            }
+
+        }
+
+        /// <summary>
+        /// Проверка на валидность ссылки
+        /// </summary>
+        /// <param name="url">Ссылка на изображение</param>
+        bool IsPageExists(string url)
+        {
+            HttpWebRequest request = (HttpWebRequest)HttpWebRequest.Create(url);
+            request.Method = "HEAD";
+            try
+            {
+                request.GetResponse();
+                return true;
+            }
+            catch (WebException ex)
+            {
+                logger.Error($"{ex.Message} Url: {url}");
+                Console.WriteLine(ex.Message);
+                return false;
             }
         }
 
@@ -265,7 +334,7 @@ namespace ImgWebService
                 logger.Error(ex.Message);
                 Console.WriteLine(ex.Message);
             }
-            
+
             Console.WriteLine(JsonConvert.SerializeObject(JsonAnswerList, Newtonsoft.Json.Formatting.Indented));
         }
 
